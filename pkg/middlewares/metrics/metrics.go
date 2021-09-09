@@ -30,6 +30,8 @@ type metricsMiddleware struct {
 	next                 http.Handler
 	reqsCounter          gokitmetrics.Counter
 	reqsTLSCounter       gokitmetrics.Counter
+	bytesSentCounter     gokitmetrics.Counter
+	bytesReceivedCounter gokitmetrics.Counter
 	reqDurationHistogram metrics.ScalableHistogram
 	openConnsGauge       gokitmetrics.Gauge
 	baseLabels           []string
@@ -71,6 +73,8 @@ func NewServiceMiddleware(ctx context.Context, next http.Handler, registry metri
 		next:                 next,
 		reqsCounter:          registry.ServiceReqsCounter(),
 		reqsTLSCounter:       registry.ServiceReqsTLSCounter(),
+		bytesReceivedCounter: registry.ServiceBytesReceivedCounter(),
+		bytesSentCounter:     registry.ServiceBytesSentCounter(),
 		reqDurationHistogram: registry.ServiceReqDurationHistogram(),
 		openConnsGauge:       registry.ServiceOpenConnsGauge(),
 		baseLabels:           []string{"service", serviceName},
@@ -117,9 +121,20 @@ func (m *metricsMiddleware) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 
 	recorder := newResponseRecorder(rw)
 	start := time.Now()
+	var responseWrapper http.ResponseWriter = recorder
+	if m.bytesSentCounter != nil {
+		responseWrapper = NewResponseWritrWrapper(recorder, m.bytesSentCounter.With(m.baseLabels...))
+	}
+	if m.bytesReceivedCounter != nil {
+		bodyWrapper := NewBodyWrapper(req.Body, m.bytesReceivedCounter.With(m.baseLabels...))
+		bodyWrapper.add(requestHeaderSize(req))
+		req.Body = bodyWrapper
+	}
 
-	m.next.ServeHTTP(recorder, req)
-
+	m.next.ServeHTTP(responseWrapper, req)
+	if m.bytesSentCounter != nil {
+		responseWrapper.(*ResponseWriterWrapper).add(responseHeaderSize(responseWrapper.Header(), req.Proto, recorder.getCode()))
+	}
 	labels = append(labels, "code", strconv.Itoa(recorder.getCode()))
 
 	histograms := m.reqDurationHistogram.With(labels...)

@@ -121,23 +121,21 @@ func (m *metricsMiddleware) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 
 	recorder := newResponseRecorder(rw)
 	start := time.Now()
-
-	responseWrapper := NewResponseWritrWrapper(recorder)
-	bodyWrapper := NewBodyWrapper(req.Body)
-	bodyWrapper.read += uint64(requestHeaderSize(req))
-	req.Body = bodyWrapper
+	var responseWrapper http.ResponseWriter = recorder
+	if m.bytesSentCounter != nil {
+		responseWrapper = NewResponseWritrWrapper(recorder, m.bytesSentCounter.With(m.baseLabels...))
+	}
+	if m.bytesReceivedCounter != nil {
+		bodyWrapper := NewBodyWrapper(req.Body, m.bytesReceivedCounter.With(m.baseLabels...))
+		bodyWrapper.add(requestHeaderSize(req))
+		req.Body = bodyWrapper
+	}
 
 	m.next.ServeHTTP(responseWrapper, req)
-	responseWrapper.sent += uint64(responseHeaderSize(responseWrapper.Header(), req.Proto, ""))
-
-	labels = append(labels, "code", strconv.Itoa(recorder.getCode()))
-
-	if m.bytesReceivedCounter != nil {
-		m.bytesReceivedCounter.With(m.baseLabels...).Add(float64(bodyWrapper.read))
-	}
 	if m.bytesSentCounter != nil {
-		m.bytesSentCounter.With(m.baseLabels...).Add(float64(responseWrapper.sent))
+		responseWrapper.(*ResponseWriterWrapper).add(responseHeaderSize(responseWrapper.Header(), req.Proto, recorder.getCode()))
 	}
+	labels = append(labels, "code", strconv.Itoa(recorder.getCode()))
 
 	histograms := m.reqDurationHistogram.With(labels...)
 	histograms.ObserveFromStart(start)
